@@ -172,6 +172,21 @@ for idx in outliers_total.index:
     for col in ref_cols:
         print(f"  {col}: {row[col]}")
     print("-" * 50)
+
+valid_uses = "Hospital|Care|Laboratory|Data"
+
+rows_to_drop = outliers_total[
+    ~outliers_total["LargestPropertyUseType"]
+      .fillna("")
+      .str.contains(valid_uses, case=False)
+].index
+
+# Suppression
+df_cleaned = df.drop(index=rows_to_drop)
+
+print(f"{len(rows_to_drop)} lignes supprimées")
+
+
     
 
 # * Débarrassez-vous des features redondantes en utilisant une matrice de corrélation de Pearson. Pour cela, utiisez la méthode corr() de Pandas, couplé d'un graphique Heatmap de la librairie Seaborn 
