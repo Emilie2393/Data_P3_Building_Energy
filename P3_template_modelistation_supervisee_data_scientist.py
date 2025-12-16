@@ -5,36 +5,21 @@
 
 # ### Import des modules
 
-# In[ ]:
-
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns 
 import os 
-
+import numpy as np
 
 # ### Analyse Exploratoire
 
-# In[ ]:
-
-
 building_consumption = pd.read_csv("2016_Building_Energy_Benchmarking.csv")
-
-
-# In[ ]:
-
 
 # On regarde comment un batiment est défini dans ce jeu de données 
 building_consumption.head()
 
-
-# In[ ]:
-
-
 # On regarde le nombre de valeurs manquantes par colonne ainsi que leur type 
 building_consumption.info()
-
 
 # #### TERMINER L'ANALYSE EXPLORATOIRE 
 
@@ -42,7 +27,6 @@ building_consumption.info()
 # - Une analyse descriptive des données, y compris une explication du sens des colonnes gardées, des arguments derrière la suppression de lignes ou de colonnes, des statistiques descriptives et des visualisations pertinentes.
 
 # Qelques pistes d'analyse : 
-
 
 # Suppression des lignes concernant des immeubles d'habitation
 to_delete = ["Multifamily LR (1-4)", "Multifamily MR (5-9)", "Multifamily HR (10+)"]
@@ -84,9 +68,6 @@ plt.close()
 
 # ### Import des modules 
 
-# In[ ]:
-
-
 #Selection
 from sklearn.model_selection import (
     train_test_split,
@@ -105,7 +86,6 @@ from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestRegressor
-
 
 # ### Feature Engineering
 
@@ -140,10 +120,7 @@ df["SteamShare"] = df.apply(
 
 df.to_excel("2016_Building_Energy_V1.xlsx", index=False)
 
-
-
 # CODE FEATURE ENGINEERING
-
 
 # ### Préparation des features pour la modélisation
 
@@ -151,9 +128,7 @@ df.to_excel("2016_Building_Energy_V1.xlsx", index=False)
 # * Si ce n'est pas déjà fait, supprimer toutes les colonnes peu pertinentes pour la modélisation.
 # * Tracer la distribution de la cible pour vous familiariser avec l'ordre de grandeur. En cas d'outliers, mettez en place une démarche pour les supprimer.
 
-ref_col = ['PropertyGFATotal', 'NumberofBuildings']
-
-def detect_outliers_iqr(series, k=1.5):
+def detect_outliers_iqr(series, k=5):
     """
     Détecte outliers par IQR en ignorant NaN et 0 pour le calcul des quantiles.
     k : multiplicateur IQR (1.5 classique, 3.0 plus strict)
@@ -162,37 +137,42 @@ def detect_outliers_iqr(series, k=1.5):
     # Nettoyage pour calcul des quantiles
     clean = series.dropna()
     clean = clean[clean != 0]
-
     if clean.empty:
         return pd.Series([], dtype=series.dtype)
 
-    # <-- CORRECTION : calculer Q1/Q3 sur 'clean', pas sur 'series' -->
     Q1 = clean.quantile(0.25)
     Q3 = clean.quantile(0.75)
     IQR = Q3 - Q1
-
     lower_bound = Q1 - k * IQR
     upper_bound = Q3 + k * IQR
 
     # Appliquer les bornes sur la série originale (pour conserver NaN et 0 non marqués)
     outliers = series[(series < lower_bound) | (series > upper_bound)]
-
     return outliers
 
+# IQR
+outliers_iqr = detect_outliers_iqr(df["SiteEUI(kBtu/sf)"], k=3)
 
-# Parcourir toutes les colonnes numériques
-numeric_cols = df.select_dtypes(include='number').columns
+# seuil absolu
+seuil_physique = 400  # valeur réaliste maximale pour tout type de bâtiment
+outliers_physique = df[df["SiteEUI(kBtu/sf)"] > seuil_physique]
 
-for col in numeric_cols:
-    outliers = detect_outliers_iqr(df[col])
-    if not outliers.empty:
-        print(f"\nColonne : {col} - {len(outliers)} outliers trouvés")
-        for idx, value in outliers.items():
-            print(f"  {col}: {value}")
-            
-            # Affiche les 2 autres colonnes et leurs valeurs
-            for ref in ref_col:
-                print(f"  {ref}: {df.loc[idx, ref]}")
+# fusionner les deux
+outliers_total = df.loc[outliers_iqr.index.union(outliers_physique.index)]
+
+# Colonnes de référence à afficher
+ref_cols = ["PropertyGFATotal", "NumberofBuildings", "LargestPropertyUseType"]
+
+# Afficher les lignes des outliers
+print(f"\nLignes contenant les outliers de SiteEUI (total {len(outliers_total)} lignes) :\n")
+
+for idx in outliers_total.index:
+    row = df.loc[idx]
+    print(f"Ligne {idx}: SiteEUI = {row['SiteEUI(kBtu/sf)']}")
+    for col in ref_cols:
+        print(f"  {col}: {row[col]}")
+    print("-" * 50)
+    
 
 # * Débarrassez-vous des features redondantes en utilisant une matrice de corrélation de Pearson. Pour cela, utiisez la méthode corr() de Pandas, couplé d'un graphique Heatmap de la librairie Seaborn 
 # * Réalisez différents graphiques pour comprendre le lien entre vos features et la target (boxplots, scatterplots, pairplot si votre nombre de features numériques n'est pas très élevé).
