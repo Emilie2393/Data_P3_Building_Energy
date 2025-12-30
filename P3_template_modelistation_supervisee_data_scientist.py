@@ -10,6 +10,26 @@ import matplotlib.pyplot as plt
 import seaborn as sns 
 import os 
 import numpy as np
+# ### Import des modules 
+
+#Selection
+from sklearn.model_selection import (
+    train_test_split,
+    GridSearchCV, 
+    cross_validate,
+)
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error 
+from sklearn.inspection import permutation_importance
+
+#Preprocess
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+
+#Modèles
+from sklearn.dummy import DummyRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
 
 class BuildingEnergyStudy():
 
@@ -73,26 +93,7 @@ class BuildingEnergyStudy():
 
     # # Modélisation 
 
-    # ### Import des modules 
-
-    #Selection
-    from sklearn.model_selection import (
-        train_test_split,
-        GridSearchCV, 
-        cross_validate,
-    )
-    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error 
-    from sklearn.inspection import permutation_importance
-
-    #Preprocess
-    from sklearn.compose import ColumnTransformer
-    from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
-
-    #Modèles
-    from sklearn.dummy import DummyRegressor
-    from sklearn.linear_model import LinearRegression
-    from sklearn.svm import SVR
-    from sklearn.ensemble import RandomForestRegressor
+    
 
     # ### Feature Engineering
 
@@ -162,6 +163,8 @@ class BuildingEnergyStudy():
     
     def delete_outliers(self):
 
+        self.df_filtered = self.df_filtered[~self.df_filtered["ComplianceStatus"].isin(["Missing Data", "Not-Compliant"])]
+
         # IQR
         outliers_iqr = self.detect_outliers_iqr(self.df_filtered["SiteEUI(kBtu/sf)"], k=3)
 
@@ -196,7 +199,7 @@ class BuildingEnergyStudy():
         # Suppression
         self.df_filtered = self.df_filtered.drop(index=rows_to_drop)
 
-        print(f"{len(rows_to_drop)} lignes supprimées")
+        print(f"{len(rows_to_drop)} lignes supprimées - outliers dont l'utilité contient d'autres termes que Hospital, Care, Laboratory et Data")
 
     # * Débarrassez-vous des features redondantes en utilisant une matrice de corrélation de Pearson. Pour cela, utiisez la méthode corr() de Pandas, couplé d'un graphique Heatmap de la librairie Seaborn 
 
@@ -218,14 +221,14 @@ class BuildingEnergyStudy():
 
     # * Réalisez différents graphiques pour comprendre le lien entre vos features et la target (boxplots, scatterplots, pairplot si votre nombre de features numériques n'est pas très élevé).
 
-    def pairplot(self, target, df):
-        selected_feature = [
+    def pairplot(self):
+        selected_features = [
             self.target,
             "BuildingAge",
             "ElectricityShare",
             "PropertyGFATotal",
             "NumberofFloors",
-            "ENERGYSTARTScore"
+            "ENERGYSTARScore"
         ]
 
         sns.pairplot(
@@ -235,16 +238,81 @@ class BuildingEnergyStudy():
         )
         plt.savefig(f"plots/target_pairplot.png", dpi=500, bbox_inches="tight")
 
+    # *  Séparez votre jeu de données en un Pandas DataFrame X (ensemble de feautures) et Pandas Series y (votre target).
+    # * Si vous avez des features catégorielles, il faut les encoder pour que votre modèle fonctionne. Les deux méthodes d'encodage à connaitre sont le OneHotEncoder et le LabelEncoder
+    
+    def target_feature_encoder(self):
+
+        X = self.df_filtered.drop(columns=[self.target])
+        y = self.df_filtered[self.target]
+
+        # divise le jeu de données entrainement/test pour éviter que le modèle détecte les réponses à l'avance
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+
+        property_use_cols = [
+            "LargestPropertyUseType",
+            "SecondLargestPropertyUseType",
+            "ThirdLargestPropertyUseType"
+        ]
+
+        def group_rare(series, min_freq):
+            """
+            Remplace les catégories peu fréquentes par 'Other'
+            """
+            counts = series.value_counts()
+            rare_categories = counts[counts < min_freq].index
+            return series.replace(rare_categories, "Other")
+        
+        for col in property_use_cols:
+            X[col] = group_rare(X[col], 5)
+
+        # Récupérer les ensembles de catégories uniques (en ignorant les NaN)
+        sets = {
+            col: set(X[col].dropna().unique())
+            for col in property_use_cols
+        }
+
+        # Créer un set de toutes les catégories uniques toutes colonnes confondues
+        all_categories = set().union(*sets.values())
+
+        # Nombre total de catégories uniques
+        total_categories = len(all_categories)
+        print(f"Nombre total de catégories uniques sur toutes les colonnes PropertyUse : {total_categories}")
+        # Recouvrement pair à pair
+        print("Recouvrement entre les colonnes :\n")
+
+        for i in range(len(property_use_cols)):
+            for j in range(i + 1, len(property_use_cols)):
+                col1 = property_use_cols[i]
+                col2 = property_use_cols[j]
+                overlap = sets[col1] & sets[col2]
+
+                print(f"{col1} ∩ {col2} : {len(overlap)} catégories communes")
+        
+        
+
+
+        cat_cols = X.select_dtypes(include=["object", "category"]).columns
+        num_cols = X.select_dtypes(exclude=["object", "category"]).columns
+
+
+
+
+
+
     
     def exec_analysis(self):
 
         self.doc_analysis()
-        self.first_graph()
+        #self.first_graph()
         self.new_features()
-        self.target_distribution()
+        #self.target_distribution()
         self.delete_outliers()
         self.pearson()
-        self.pairplot()
+        #self.pairplot()
+        self.target_feature_encoder()
 
 results = BuildingEnergyStudy()
 results.exec_analysis()
@@ -255,8 +323,6 @@ results.exec_analysis()
 
 
 
-# *  Séparez votre jeu de données en un Pandas DataFrame X (ensemble de feautures) et Pandas Series y (votre target).
-# * Si vous avez des features catégorielles, il faut les encoder pour que votre modèle fonctionne. Les deux méthodes d'encodage à connaitre sont le OneHotEncoder et le LabelEncoder
 
 # In[ ]:
 
