@@ -34,9 +34,18 @@ from sklearn.ensemble import RandomForestRegressor
 class BuildingEnergyStudy():
 
     def __init__(self):
-        self.target = "SiteEUI(kBtu/sf)"
         self.df = pd.read_csv("2016_Building_Energy_Benchmarking.csv")
         self.df_filtered = None
+        self.preprocessor = None
+        self.targets = {
+            "TotalGHGEmissions": df["TotalGHGEmissions"],
+            "SiteEUI(kBtu/sf)": df["SiteEUI(kBtu/sf)"]
+        }
+        self.X = None
+        self.models = None
+        self.param_grids = None
+        self.X_sample = None
+        self.targets_sample = None
 
     # ### Analyse Exploratoire
 
@@ -243,13 +252,7 @@ class BuildingEnergyStudy():
     
     def target_feature_encoder(self):
 
-        X = self.df_filtered.drop(columns=[self.target])
-        y = self.df_filtered[self.target]
-
-        # divise le jeu de données entrainement/test pour éviter que le modèle détecte les réponses à l'avance
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+        X = self.df_filtered.drop(columns=["TotalGHGEmissions", "SiteEUI(kBtu/sf)"])
 
         property_use_cols = [
             "LargestPropertyUseType",
@@ -265,6 +268,7 @@ class BuildingEnergyStudy():
             rare_categories = counts[counts < min_freq].index
             return series.replace(rare_categories, "Other")
         
+        # Remplacer les catégories présentes moins de 5 fois
         for col in property_use_cols:
             X[col] = group_rare(X[col], 5)
 
@@ -291,42 +295,26 @@ class BuildingEnergyStudy():
 
                 print(f"{col1} ∩ {col2} : {len(overlap)} catégories communes")
         
-        
-
-
-        cat_cols = X.select_dtypes(include=["object", "category"]).columns
         num_cols = X.select_dtypes(exclude=["object", "category"]).columns
 
+        self.X = X[property_use_cols + num_cols]
 
-
-
-
-
-    
-    def exec_analysis(self):
-
-        self.doc_analysis()
-        #self.first_graph()
-        self.new_features()
-        #self.target_distribution()
-        self.delete_outliers()
-        self.pearson()
-        #self.pairplot()
-        self.target_feature_encoder()
-
-results = BuildingEnergyStudy()
-results.exec_analysis()
-
-
-
-
-
-
-
-
-# In[ ]:
-
-
+        # Encode les colonnes property_use_cols et normalise les colonnes numérique pour le modèle linéaire
+        self.preprocessor = ColumnTransformer(
+            transformers=[
+                (
+                    "property_use",
+                    OneHotEncoder(drop="first", handle_unknown="ignore"),
+                    property_use_cols
+                ),
+                (
+                    "num",
+                    StandardScaler(),
+                    num_cols
+                )
+            ],
+            remainder="passthrough"
+        )
 
 
 # CODE PREPARATION DES FEATURES
@@ -338,12 +326,110 @@ results.exec_analysis()
 # * Pour chaque algorithme que vous allez tester, vous devez :
 #     * Réaliser au préalable une séparation en jeu d'apprentissage et jeu de test via une validation croisée.
 #     * Si les features quantitatives que vous souhaitez utiliser ont des ordres de grandeur très différents les uns des autres, et que vous utilisez un algorithme de regression qui est sensible à cette différence, alors il faut réaliser un scaling (normalisation) de la donnée au préalable.
-#     * Entrainer le modèle sur le jeu de Train
+#     * Entrainer le modèle sur le jeu de Train    
 #     * Prédire la cible sur la donnée de test (nous appelons cette étape, l'inférence).
 #     * Calculer les métriques de performance R2, MAE et RMSE sur le jeu de train et de test.
 #     * Interpréter les résultats pour juger de la fiabilité de l'algorithme.
 # * Vous pouvez choisir par exemple de tester un modèle linéaire, un modèle à base d'arbres et un modèle de type SVM
 # * Déterminer le modèle le plus performant parmi ceux testés.
+
+    def use_small_sample(self, frac=0.1, random_state=42):
+        self.X_sample = self.X.sample(frac=frac, random_state=random_state)
+        self.targets_sample = {
+            name: y.loc[self.X_sample.index]
+            for name, y in self.targets.items()
+        }
+
+
+    def get_models_params(self):
+
+        self.models = {
+            "dummy": DummyRegressor(strategy="mean"),
+            "linear": LinearRegression(),
+            "svr": SVR(),
+            "random_forest": RandomForestRegressor(random_state=42)
+        }
+
+        self.param_grids = {
+            "dummy": {},
+
+            "linear": {},  # pas d'hyperparamètres principaux
+
+            "svr": {
+                "model__C": [1, 10],
+                "model__epsilon": [0.1, 0.5],
+                "model__kernel": ["rbf"]
+            },
+
+            "random_forest": {
+                "model__n_estimators": [200],
+                "model__max_depth": [None, 20],
+                "model__min_samples_leaf": [1, 5]
+            }
+        }
+
+    def train_and_predict_regression(self, models, param_grids,
+                                     test_size=0.2, cv=5):
+    """
+    Entraîne et évalue plusieurs modèles de régression
+    pour prédire :
+    - émissions de CO2
+    - consommation totale d'énergie
+    """
+
+    self.results_ = {}
+
+    for target_name, y in self.targets.items():
+
+        # 1️⃣ Split final
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X,
+            y,
+            test_size=test_size,
+            random_state=42
+        )
+
+        self.results_[target_name] = {}
+
+        for model_name, model in models.items():
+
+            # Pipeline
+            pipe = Pipeline(
+                steps=[
+                    ("preprocessing", self.preprocessor),
+                    ("model", model)
+                ]
+            )
+
+            # GridSearchCV
+            grid = GridSearchCV(
+                estimator=pipe,
+                param_grid=param_grids[model_name],
+                cv=cv,
+                scoring="neg_root_mean_squared_error",
+                n_jobs=-1
+            )
+
+            # Entraînement
+            grid.fit(X_train, y_train)
+
+            # Prédiction
+            y_pred = grid.predict(X_test)
+
+            # Métriques
+            rmse = mean_squared_error(y_test, y_pred, squared=False)
+            r2 = r2_score(y_test, y_pred)
+
+            # Stockage
+            self.results_[target_name][model_name] = {
+                "rmse": rmse,
+                "r2": r2,
+                "best_params": grid.best_params_,
+                "best_estimator": grid.best_estimator_
+            }
+
+
+
 
 # In[1]:
 
@@ -358,6 +444,22 @@ results.exec_analysis()
 # * Si le meilleur modèle fait partie de la famille des modèles à arbres (RandomForest, GradientBoosting) alors utilisez la fonctionnalité feature importance pour identifier les features les plus impactantes sur la performance du modèle. Sinon, utilisez la méthode Permutation Importance de sklearn.
 
 # In[ ]:
+
+def exec_analysis(self):
+
+        self.doc_analysis()
+        #self.first_graph()
+        self.new_features()
+        #self.target_distribution()
+        self.delete_outliers()
+        self.pearson()
+        #self.pairplot()
+        self.target_feature_encoder()
+        self.get_models_params()
+        self.train_and_predict_regression(self.models, self.param_grids)
+
+results = BuildingEnergyStudy()
+results.exec_analysis()
 
 
 # CODE OPTIMISATION ET INTERPRETATION DU MODELE
