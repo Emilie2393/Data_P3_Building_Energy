@@ -18,12 +18,14 @@ from sklearn.model_selection import (
     GridSearchCV, 
     cross_validate,
 )
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error 
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, make_scorer
 from sklearn.inspection import permutation_importance
 
 #Preprocess
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 
 #Modèles
 from sklearn.dummy import DummyRegressor
@@ -37,10 +39,7 @@ class BuildingEnergyStudy():
         self.df = pd.read_csv("2016_Building_Energy_Benchmarking.csv")
         self.df_filtered = None
         self.preprocessor = None
-        self.targets = {
-            "TotalGHGEmissions": df["TotalGHGEmissions"],
-            "SiteEUI(kBtu/sf)": df["SiteEUI(kBtu/sf)"]
-        }
+        self.targets = None
         self.X = None
         self.models = None
         self.param_grids = None
@@ -250,70 +249,76 @@ class BuildingEnergyStudy():
     # *  Séparez votre jeu de données en un Pandas DataFrame X (ensemble de feautures) et Pandas Series y (votre target).
     # * Si vous avez des features catégorielles, il faut les encoder pour que votre modèle fonctionne. Les deux méthodes d'encodage à connaitre sont le OneHotEncoder et le LabelEncoder
     
-    def target_feature_encoder(self):
-
-        X = self.df_filtered.drop(columns=["TotalGHGEmissions", "SiteEUI(kBtu/sf)"])
-
-        property_use_cols = [
-            "LargestPropertyUseType",
-            "SecondLargestPropertyUseType",
-            "ThirdLargestPropertyUseType"
+    def target_feature_encoder(self, min_freq=5):
+        """
+        Prépare X et le preprocessor :
+        - conserve uniquement l'usage principal du bâtiment
+        - regroupe les catégories rares
+        - gère les valeurs manquantes
+        - encode et normalise les données
+        """
+        nums_cols_to_use = [
+            "CouncilDistrictCode",
+            "NumberofBuildings",
+            "NumberofFloors",
+            "PropertyGFATotal",
+            "Electricity(kWh)",
+            "NaturalGas(therms)",
+            "BuildingAge",
+            "ElectricityShare"
         ]
+        # Séparation X / y
+        X = self.df_filtered[nums_cols_to_use].copy()
 
-        def group_rare(series, min_freq):
-            """
-            Remplace les catégories peu fréquentes par 'Other'
-            """
-            counts = series.value_counts()
-            rare_categories = counts[counts < min_freq].index
-            return series.replace(rare_categories, "Other")
-        
-        # Remplacer les catégories présentes moins de 5 fois
-        for col in property_use_cols:
-            X[col] = group_rare(X[col], 5)
+        # Remplir LargestPropertyUseType si NaN
+        X["LargestPropertyUseType"] = self.df_filtered["LargestPropertyUseType"].fillna(
+            self.df_filtered["ListOfAllPropertyUseTypes"]
+        )
 
-        # Récupérer les ensembles de catégories uniques (en ignorant les NaN)
-        sets = {
-            col: set(X[col].dropna().unique())
-            for col in property_use_cols
-        }
+        # Supprimer les lignes où il n'y a toujours pas de valeur
+        X = X.dropna(subset=["LargestPropertyUseType"])
 
-        # Créer un set de toutes les catégories uniques toutes colonnes confondues
-        all_categories = set().union(*sets.values())
 
-        # Nombre total de catégories uniques
-        total_categories = len(all_categories)
-        print(f"Nombre total de catégories uniques sur toutes les colonnes PropertyUse : {total_categories}")
-        # Recouvrement pair à pair
-        print("Recouvrement entre les colonnes :\n")
+        # Colonne catégorielle conservée (usage principal uniquement)
+        property_use_col = "LargestPropertyUseType"
 
-        for i in range(len(property_use_cols)):
-            for j in range(i + 1, len(property_use_cols)):
-                col1 = property_use_cols[i]
-                col2 = property_use_cols[j]
-                overlap = sets[col1] & sets[col2]
+        # Regroupement des catégories rares
+        counts = X[property_use_col].value_counts()
+        rare_categories = counts[counts < min_freq].index
 
-                print(f"{col1} ∩ {col2} : {len(overlap)} catégories communes")
-        
-        num_cols = X.select_dtypes(exclude=["object", "category"]).columns
+        # Information exploratoire
+        print(
+            f"Nombre de catégories après regroupement : "
+            f"{X[property_use_col].nunique()}"
+        )
 
-        self.X = X[property_use_cols + num_cols]
+        # Colonnes numériques
+        num_cols = X.select_dtypes(
+            exclude=["object", "category"]
+        ).columns.tolist()
 
-        # Encode les colonnes property_use_cols et normalise les colonnes numérique pour le modèle linéaire
+        # Features finales
+        self.X = X[[property_use_col] + num_cols]
+
+        # Preprocessor complet (imputation + encoding + scaling)
         self.preprocessor = ColumnTransformer(
             transformers=[
                 (
                     "property_use",
-                    OneHotEncoder(drop="first", handle_unknown="ignore"),
-                    property_use_cols
+                    Pipeline(steps=[
+                        ("encoder", OneHotEncoder(handle_unknown="ignore"))
+                    ]),
+                    [property_use_col]
                 ),
                 (
                     "num",
-                    StandardScaler(),
+                    Pipeline(steps=[
+                        ("imputer", SimpleImputer(strategy="median")),
+                        ("scaler", StandardScaler())
+                    ]),
                     num_cols
                 )
-            ],
-            remainder="passthrough"
+            ]
         )
 
 
@@ -335,6 +340,10 @@ class BuildingEnergyStudy():
 
     def use_small_sample(self, frac=0.1, random_state=42):
         self.X_sample = self.X.sample(frac=frac, random_state=random_state)
+        self.targets = {
+            "TotalGHGEmissions": self.df_filtered["TotalGHGEmissions"],
+            "SiteEUI(kBtu/sf)": self.df_filtered["SiteEUI(kBtu/sf)"]
+        }
         self.targets_sample = {
             name: y.loc[self.X_sample.index]
             for name, y in self.targets.items()
@@ -368,65 +377,136 @@ class BuildingEnergyStudy():
             }
         }
 
-    def train_and_predict_regression(self, models, param_grids,
-                                     test_size=0.2, cv=5):
-    """
-    Entraîne et évalue plusieurs modèles de régression
-    pour prédire :
-    - émissions de CO2
-    - consommation totale d'énergie
-    """
+    
 
-    self.results_ = {}
+    def run_cross_validate_simple(self, model, target_name, cv=5):
+        """
+        Entraîne et évalue un modèle avec cross_validate (cv=5).
+        """
 
-    for target_name, y in self.targets.items():
+        self.results_ = {}
 
-        # 1️⃣ Split final
-        X_train, X_test, y_train, y_test = train_test_split(
-            self.X,
-            y,
-            test_size=test_size,
-            random_state=42
-        )
+        for target_name, y in self.targets_sample.items():
 
-        self.results_[target_name] = {}
+            # 🔹 Split final train/test pour garder un jeu de test indépendant
+            X_train, X_test, y_train, y_test = train_test_split(
+                self.X_sample,
+                y,
+                test_size=0.2,
+                random_state=42
+            )
 
-        for model_name, model in models.items():
+            self.results_[target_name] = {}
 
-            # Pipeline
-            pipe = Pipeline(
-                steps=[
+            # Boucle sur chaque modèle
+            for model_name, model in self.models.items():
+
+                # 🔹 Pipeline avec ton preprocessor déjà configuré
+                pipe = Pipeline([
                     ("preprocessing", self.preprocessor),
                     ("model", model)
-                ]
+                ])
+
+                # 🔹 Définition des métriques pour cross_validate
+                scoring = {
+                    "r2": "r2",
+                    "mae": "neg_mean_absolute_error",
+                    "rmse": "neg_root_mean_squared_error"
+                }
+
+                # 🔹 Validation croisée sur le TRAIN seulement
+                cv_results = cross_validate(
+                    estimator=pipe,
+                    X=X_train,
+                    y=y_train,
+                    cv=5,
+                    scoring=scoring,
+                    return_train_score=True
+                )
+
+                # Fit final sur tout le train pour le test indépendant
+                pipe.fit(X_train, y_train)
+                y_test_pred = pipe.predict(X_test)
+
+                # Calcul métriques sur le test
+                mse_test = mean_squared_error(y_test, y_test_pred)
+                rmse_test = np.sqrt(mse_test)
+                r2_test = r2_score(y_test, y_test_pred)
+                mae_test = mean_absolute_error(y_test, y_test_pred)
+
+                # Stockage des résultats
+                self.results_[target_name][model_name] = {
+                    # CV metrics
+                    "rmse_cv_mean": cv_results["test_rmse"].mean(),
+                    "r2_cv_mean": cv_results["test_r2"].mean(),
+                    "mae_cv_mean": cv_results["test_mae"].mean(),
+                    # Test metrics
+                    "rmse_test": rmse_test,
+                    "r2_test": r2_test,
+                    "mae_test": mae_test,
+                    "model": pipe
+                }
+
+
+    def train_and_predict_regression(self, models, param_grids,
+                                     test_size=0.2, cv=5):
+        """
+        Entraîne et évalue plusieurs modèles de régression
+        pour prédire :
+        - émissions de CO2
+        - consommation totale d'énergie
+        """
+
+        self.results_ = {}
+
+        for target_name, y in self.targets_sample.items():
+
+            # Split final
+            X_train, X_test, y_train, y_test = train_test_split(
+                self.X_sample,
+                y,
+                test_size=test_size,
+                random_state=42
             )
 
-            # GridSearchCV
-            grid = GridSearchCV(
-                estimator=pipe,
-                param_grid=param_grids[model_name],
-                cv=cv,
-                scoring="neg_root_mean_squared_error",
-                n_jobs=-1
-            )
+            self.results_[target_name] = {}
 
-            # Entraînement
-            grid.fit(X_train, y_train)
+            for model_name, model in models.items():
 
-            # Prédiction
-            y_pred = grid.predict(X_test)
+                # Pipeline
+                pipe = Pipeline(
+                    steps=[
+                        ("preprocessing", self.preprocessor),
+                        ("model", model)
+                    ]
+                )
 
-            # Métriques
-            rmse = mean_squared_error(y_test, y_pred, squared=False)
-            r2 = r2_score(y_test, y_pred)
+                # GridSearchCV
+                grid = GridSearchCV(
+                    estimator=pipe,
+                    param_grid=param_grids[model_name],
+                    cv=cv,
+                    scoring="neg_root_mean_squared_error",
+                    n_jobs=-1
+                )
 
-            # Stockage
-            self.results_[target_name][model_name] = {
-                "rmse": rmse,
-                "r2": r2,
-                "best_params": grid.best_params_,
-                "best_estimator": grid.best_estimator_
-            }
+                # Entraînement
+                grid.fit(X_train, y_train)
+
+                # Prédiction
+                y_pred = grid.predict(X_test)
+
+                # Métriques
+                rmse = mean_squared_error(y_test, y_pred, squared=False)
+                r2 = r2_score(y_test, y_pred)
+
+                # Stockage
+                self.results_[target_name][model_name] = {
+                    "rmse": rmse,
+                    "r2": r2,
+                    "best_params": grid.best_params_,
+                    "best_estimator": grid.best_estimator_
+                }
 
 
 
@@ -445,18 +525,20 @@ class BuildingEnergyStudy():
 
 # In[ ]:
 
-def exec_analysis(self):
+    def exec_analysis(self):
 
-        self.doc_analysis()
-        #self.first_graph()
-        self.new_features()
-        #self.target_distribution()
-        self.delete_outliers()
-        self.pearson()
-        #self.pairplot()
-        self.target_feature_encoder()
-        self.get_models_params()
-        self.train_and_predict_regression(self.models, self.param_grids)
+            self.doc_analysis()
+            #self.first_graph()
+            self.new_features()
+            #self.target_distribution()
+            self.delete_outliers()
+            self.pearson()
+            #self.pairplot()
+            self.target_feature_encoder()
+            self.use_small_sample()
+            self.get_models_params()
+            self.run_cross_validate_simple(self.models, self.param_grids)
+            #self.train_and_predict_regression(self.models, self.param_grids)
 
 results = BuildingEnergyStudy()
 results.exec_analysis()
