@@ -84,14 +84,18 @@ class BuildingEnergyStudy():
         """
 
         # * Utiliser des pairplots et des boxplots pour faire ressortir les outliers ou des batiments avec des valeurs peu cohérentes d'un point de vue métier 
-        
-        # standardisation des données avant graphiques
-        scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(self.df_filtered[numeric_columns])
-        
+
         output_dir = "graph"
         os.makedirs(output_dir, exist_ok=True)
         numeric_columns = self.df_filtered.select_dtypes(include=["float64", "int64"]).columns
+
+        # standardisation des données avant graphiques
+        scaler = StandardScaler()
+        scaled_data = scaler.fit_transform(self.df_filtered[numeric_columns])
+        scaled_df = pd.DataFrame(
+            scaled_data,
+            columns=numeric_columns
+        )
         # Pairplot
         pairplot_path = os.path.join(output_dir, "pairplot.png")
         sns.pairplot(self.df_filtered[numeric_columns])
@@ -101,7 +105,7 @@ class BuildingEnergyStudy():
         # Boxplot
         boxplot_path = os.path.join(output_dir, "boxplot.png")
         plt.figure(figsize=(10, 6))
-        sns.boxplot(data=scaled_data, columns=numeric_columns)
+        sns.boxplot(data=scaled_df)
         plt.xticks(rotation=45)
         plt.savefig(boxplot_path, dpi=300, bbox_inches="tight")
         plt.close()
@@ -619,16 +623,27 @@ class BuildingEnergyStudy():
 
             # Feature importance
             if "feature_importance" in res:
-                print(f"\nFeature importance (top {10}) :")
+                print(f"\nFeature importance {target} (top {10}) :")
                 print(res["feature_importance"].head(10))
+                plt.figure(figsize=(8, 5))
+                plt.barh(
+                    res["feature_importance"]["feature"].head(25),
+                    res["feature_importance"]["importance"].head(25)
+                )
+                plt.gca().invert_yaxis()  # la feature la plus importante en haut
+                plt.xlabel("Importance")
+                plt.ylabel("Feature")
+                plt.title(f"Feature importance {target}– Random Forest")
+                plt.savefig(f"graph/{target[:7]}_featureimportance.png", dpi=500, bbox_inches="tight")
+                plt.close()
 
 
     def exec_analysis(self):
 
             self.doc_analysis()
-            #self.first_graph()
+            self.first_graph()
             self.new_features()
-            #self.target_distribution()
+            self.target_distribution()
             self.delete_outliers()
             self.pearson()
             self.target_graph()
